@@ -235,7 +235,7 @@ fun RecordsScreen(state: UiState, vm: LedgerViewModel) {
 fun RecordSheet(state: UiState, vm: LedgerViewModel, onDismiss: () -> Unit) {
     var amount by remember { mutableStateOf("") }
     var category by remember { mutableStateOf("餐饮") }
-    var projectId by remember(state.projects) { mutableStateOf(state.projects.firstOrNull()?.id) }
+    var projectId by remember(state.projects) { mutableStateOf(state.projects.find { it.name == category }?.id) }
     var note by remember { mutableStateOf("") }
     var date by remember { mutableStateOf(LocalDate.now().toString()) }
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Color.White) {
@@ -244,12 +244,12 @@ fun RecordSheet(state: UiState, vm: LedgerViewModel, onDismiss: () -> Unit) {
             OutlinedTextField(amount, { amount = it }, label = { Text("花了多少钱？") }, prefix = { Text("¥") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             Text("花在哪里？", fontWeight = FontWeight.Bold)
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                categories.forEach { c -> FilterChip(selected = category == c, onClick = { category = c }, label = { Text("${emojiFor(c)} $c") }) }
+                categories.forEach { c -> FilterChip(selected = category == c, onClick = { category = c; projectId = state.projects.find { it.name == c }?.id }, label = { Text("${emojiFor(c)} $c") }) }
             }
             DropdownProject(state.projects, projectId) { projectId = it }
             OutlinedTextField(date, { date = it }, label = { Text("日期") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             OutlinedTextField(note, { note = it }, label = { Text("备注，可不填") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-            Button(onClick = { vm.addRecord(amount, category, projectId, note, date); onDismiss() }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("记好啦") }
+            Button(onClick = { val finalProjectId = state.projects.find { it.name == category }?.id ?: projectId; vm.addRecord(amount, category, finalProjectId, note, date); onDismiss() }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("记好啦") }
         }
     }
 }
