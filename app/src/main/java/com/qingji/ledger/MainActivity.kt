@@ -1,9 +1,14 @@
 package com.qingji.ledger
 
 import android.app.Application
+import android.content.Context
+import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -20,10 +25,14 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.*
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
+import com.google.mlkit.vision.text.TextRecognition
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.text.NumberFormat
@@ -90,6 +99,15 @@ data class UiState(
     val records: List<ExpenseRecord> = emptyList()
 )
 
+data class OcrBill(
+    val amount: String,
+    val category: String,
+    val merchant: String,
+    val date: String,
+    val source: String,
+    val raw: String
+)
+
 class LedgerViewModel(app: Application) : AndroidViewModel(app) {
     private val dao = LedgerDb.get(app).dao()
     private val budget = MutableStateFlow(300_000L)
@@ -126,6 +144,14 @@ class LedgerViewModel(app: Application) : AndroidViewModel(app) {
         dao.insertRecord(ExpenseRecord(amountFen = fen, category = category, projectId = projectId, note = note.trim(), date = date))
     }
 
+    fun addOcrBill(bill: OcrBill) = viewModelScope.launch {
+        val fen = yuanToFen(bill.amount)
+        if (fen <= 0) return@launch
+        val projectId = state.value.projects.find { it.name == bill.category }?.id
+        val note = "${bill.source}识别：${bill.merchant}".trim()
+        dao.insertRecord(ExpenseRecord(amountFen = fen, category = bill.category, projectId = projectId, note = note, date = bill.date))
+    }
+
     fun deleteRecord(record: ExpenseRecord) = viewModelScope.launch { dao.deleteRecord(record) }
 }
 
@@ -142,6 +168,11 @@ fun QingjiApp(vm: LedgerViewModel) {
     val state by vm.state.collectAsState()
     var tab by remember { mutableStateOf(0) }
     var showRecord by remember { mutableStateOf(false) }
+    var ocrBill by remember { mutableStateOf<OcrBill?>(null) }
+    val context = LocalContext.current
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) recognizeBillImage(context, uri, onSuccess = { ocrBill = it }, onError = { Toast.makeText(context, it, Toast.LENGTH_LONG).show() })
+    }
     MaterialTheme(colorScheme = lightColorScheme(primary = Mint, background = Bg, surface = Color.White)) {
         Scaffold(
             containerColor = Bg,
@@ -149,6 +180,7 @@ fun QingjiApp(vm: LedgerViewModel) {
                 NavigationBar(containerColor = Color.White) {
                     NavigationBarItem(selected = tab == 0, onClick = { tab = 0 }, icon = { Text("🏠") }, label = { Text("首页") })
                     NavigationBarItem(selected = false, onClick = { showRecord = true }, icon = { Text("＋", fontSize = 24.sp, fontWeight = FontWeight.Black) }, label = { Text("记一笔") })
+                    NavigationBarItem(selected = false, onClick = { imagePicker.launch("image/*") }, icon = { Text("📷") }, label = { Text("识图") })
                     NavigationBarItem(selected = tab == 1, onClick = { tab = 1 }, icon = { Text("🎯") }, label = { Text("预算") })
                     NavigationBarItem(selected = tab == 2, onClick = { tab = 2 }, icon = { Text("📒") }, label = { Text("账单") })
                 }
@@ -163,6 +195,7 @@ fun QingjiApp(vm: LedgerViewModel) {
             }
         }
         if (showRecord) RecordSheet(state, vm, onDismiss = { showRecord = false })
+        ocrBill?.let { bill -> OcrConfirmDialog(bill = bill, onDismiss = { ocrBill = null }, onSave = { vm.addOcrBill(it); Toast.makeText(context, "识别记账成功", Toast.LENGTH_SHORT).show(); ocrBill = null }) }
     }
 }
 
@@ -344,6 +377,93 @@ fun emojiFor(c: String) = mapOf("餐饮" to "🍜", "交通" to "🚌", "购物"
 fun yuanToFen(s: String): Long = ((s.toDoubleOrNull() ?: 0.0) * 100).toLong()
 fun fenPlain(fen: Long) = if (fen % 100 == 0L) (fen / 100).toString() else String.format(Locale.US, "%.2f", fen / 100.0)
 fun fen(fen: Long): String = "¥" + NumberFormat.getNumberInstance(Locale.CHINA).format(fen / 100.0)
+
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun OcrConfirmDialog(bill: OcrBill, onDismiss: () -> Unit, onSave: (OcrBill) -> Unit) {
+    var amount by remember(bill) { mutableStateOf(bill.amount) }
+    var category by remember(bill) { mutableStateOf(bill.category) }
+    var merchant by remember(bill) { mutableStateOf(bill.merchant) }
+    var date by remember(bill) { mutableStateOf(bill.date) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("识别到账单") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("来源：${bill.source}", fontWeight = FontWeight.Bold)
+                OutlinedTextField(amount, { amount = it }, label = { Text("金额") }, prefix = { Text("¥") }, singleLine = true)
+                OutlinedTextField(merchant, { merchant = it }, label = { Text("商户/备注") }, singleLine = true)
+                OutlinedTextField(date, { date = it }, label = { Text("日期") }, singleLine = true)
+                Text("类别", fontWeight = FontWeight.Bold)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    categories.forEach { c -> FilterChip(selected = category == c, onClick = { category = c }, label = { Text("${emojiFor(c)} $c") }) }
+                }
+                Text("请确认后保存。微信/支付宝截图格式很多，识别结果可能需要手动改一下。", color = Muted, fontSize = 12.sp)
+            }
+        },
+        confirmButton = { Button(onClick = { onSave(bill.copy(amount = amount, category = category, merchant = merchant, date = date)) }) { Text("保存记账") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+fun recognizeBillImage(context: Context, uri: Uri, onSuccess: (OcrBill) -> Unit, onError: (String) -> Unit) {
+    try {
+        val image = InputImage.fromFilePath(context, uri)
+        val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+        recognizer.process(image)
+            .addOnSuccessListener { result ->
+                val raw = result.text
+                val bill = parseWechatAlipayBill(raw)
+                if (bill == null) onError("没识别到账单金额，请换一张微信/支付宝付款截图") else onSuccess(bill)
+            }
+            .addOnFailureListener { onError("图片识别失败：${it.message ?: "未知错误"}") }
+    } catch (e: Exception) {
+        onError("无法读取图片：${e.message ?: "未知错误"}")
+    }
+}
+
+fun parseWechatAlipayBill(raw: String): OcrBill? {
+    val text = raw.replace("，", ",").replace("￥", "¥")
+    val source = when {
+        text.contains("微信") || text.contains("零钱") || text.contains("微信支付") -> "微信"
+        text.contains("支付宝") || text.contains("花呗") || text.contains("余额宝") -> "支付宝"
+        else -> "图片"
+    }
+    val amountPatterns = listOf(
+        Regex("""(?:¥|￥|人民币|金额|付款|支付|支出|消费)\s*([0-9]+(?:\.[0-9]{1,2})?)"""),
+        Regex("""([0-9]+(?:\.[0-9]{1,2})?)\s*元"""),
+        Regex("""-\s*(?:¥|￥)?\s*([0-9]+(?:\.[0-9]{1,2})?)"""),
+        Regex("""(?:¥|￥)\s*([0-9]+(?:\.[0-9]{1,2})?)""")
+    )
+    val amount = amountPatterns.asSequence().mapNotNull { it.find(text)?.groupValues?.getOrNull(1) }.firstOrNull { it.toDoubleOrNull()?.let { v -> v > 0 } == true } ?: return null
+    val date = Regex("(20[0-9]{2})[-/.年]([01]?[0-9])[-/.月]([0-3]?[0-9])").find(text)?.let {
+        val y = it.groupValues[1]
+        val m = it.groupValues[2].padStart(2, '0')
+        val d = it.groupValues[3].padStart(2, '0')
+        "$y-$m-$d"
+    } ?: LocalDate.now().toString()
+    val lines = raw.lines().map { it.trim() }.filter { it.length >= 2 }
+    val merchant = lines.firstOrNull { line ->
+        !line.contains("支付") && !line.contains("付款") && !line.contains("收款") && !line.contains("金额") && !line.contains("成功") && !line.contains("账单") && !line.matches(Regex(".*[0-9]{2,}.*"))
+    } ?: "微信/支付宝账单"
+    val category = guessCategory("$merchant $raw")
+    return OcrBill(amount = amount, category = category, merchant = merchant.take(30), date = date, source = source, raw = raw)
+}
+
+fun guessCategory(s: String): String {
+    val t = s.lowercase(Locale.CHINA)
+    return when {
+        listOf("餐", "饭", "外卖", "美团", "饿了", "肯德基", "麦当劳", "咖啡", "奶茶", "超市", "便利店").any { t.contains(it) } -> "餐饮"
+        listOf("滴滴", "打车", "地铁", "公交", "高铁", "火车", "机票", "停车", "加油").any { t.contains(it) } -> "交通"
+        listOf("淘宝", "京东", "拼多多", "购物", "商城", "服饰", "手机", "数码").any { t.contains(it) } -> "购物"
+        listOf("电影", "游戏", "ktv", "会员", "娱乐", "音乐", "视频").any { t.contains(it) } -> "娱乐"
+        listOf("书", "课程", "学习", "培训", "考试", "文具").any { t.contains(it) } -> "学习"
+        listOf("医院", "药", "诊所", "挂号", "医疗").any { t.contains(it) } -> "医疗"
+        listOf("房租", "物业", "水费", "电费", "燃气").any { t.contains(it) } -> "房租"
+        else -> "其他"
+    }
+}
 
 val Mint = Color(0xFF7DD3C0)
 val MintDark = Color(0xFF39A891)
