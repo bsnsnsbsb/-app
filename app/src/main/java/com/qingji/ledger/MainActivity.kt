@@ -33,6 +33,7 @@ import androidx.room.*
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.google.mlkit.vision.text.TextRecognition
+import org.apache.poi.ss.usermodel.WorkbookFactory
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import java.text.NumberFormat
@@ -190,6 +191,9 @@ fun QingjiApp(vm: LedgerViewModel) {
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) recognizeBillImage(context, uri, onSuccess = { ocrBatch = it }, onError = { Toast.makeText(context, it, Toast.LENGTH_LONG).show() })
     }
+    val tablePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) importWechatTable(context, uri, onSuccess = { ocrBatch = it }, onError = { Toast.makeText(context, it, Toast.LENGTH_LONG).show() })
+    }
     MaterialTheme(colorScheme = lightColorScheme(primary = Mint, background = Bg, surface = Color.White)) {
         Scaffold(
             containerColor = Bg,
@@ -198,6 +202,7 @@ fun QingjiApp(vm: LedgerViewModel) {
                     NavigationBarItem(selected = tab == 0, onClick = { tab = 0 }, icon = { Text("🏠") }, label = { Text("首页") })
                     NavigationBarItem(selected = false, onClick = { showRecord = true }, icon = { Text("＋", fontSize = 24.sp, fontWeight = FontWeight.Black) }, label = { Text("记一笔") })
                     NavigationBarItem(selected = false, onClick = { imagePicker.launch("image/*") }, icon = { Text("📷") }, label = { Text("识图") })
+                    NavigationBarItem(selected = false, onClick = { tablePicker.launch("*/*") }, icon = { Text("📄") }, label = { Text("导表") })
                     NavigationBarItem(selected = tab == 1, onClick = { tab = 1 }, icon = { Text("🎯") }, label = { Text("预算") })
                     NavigationBarItem(selected = tab == 2, onClick = { tab = 2 }, icon = { Text("📒") }, label = { Text("账单") })
                 }
@@ -522,6 +527,149 @@ fun cleanMerchant(s: String): String = s
     .replace("付款", "")
     .replace("消费", "")
     .trim()
+
+fun importWechatTable(context: Context, uri: Uri, onSuccess: (OcrBatch) -> Unit, onError: (String) -> Unit) {
+    try {
+        val name = uri.toString().lowercase(Locale.CHINA)
+        val bills = if (name.endsWith(".csv") || name.contains("csv")) {
+            parseWechatCsv(context, uri)
+        } else {
+            parseWechatXlsx(context, uri)
+        }
+        if (bills.isEmpty()) onError("没有识别到微信支出明细，请确认是微信账单 Excel/CSV")
+        else onSuccess(OcrBatch("微信Excel", bills, ""))
+    } catch (e: Exception) {
+        onError("导入失败：" + (e.message ?: "未知错误"))
+    }
+}
+
+fun parseWechatXlsx(context: Context, uri: Uri): List<OcrBill> {
+    context.contentResolver.openInputStream(uri).use { input ->
+        if (input == null) return emptyList()
+        val wb = WorkbookFactory.create(input)
+        val sheet = wb.getSheetAt(0)
+        var headerRow = -1
+        val headers = mutableMapOf<String, Int>()
+        for (r in 0 until minOf(sheet.physicalNumberOfRows, 30)) {
+            val row = sheet.getRow(r) ?: continue
+            val cells = (0 until row.lastCellNum.coerceAtLeast(0)).map { cellText(row.getCell(it)) }
+            if (cells.any { it.contains("交易时间") } && cells.any { it.contains("金额") || it.contains("收/支") }) {
+                headerRow = r
+                cells.forEachIndexed { idx, h -> headers[normalizeHeader(h)] = idx }
+                break
+            }
+        }
+        if (headerRow < 0) return emptyList()
+        val result = mutableListOf<OcrBill>()
+        for (r in headerRow + 1..sheet.lastRowNum) {
+            val row = sheet.getRow(r) ?: continue
+            val bill = parseWechatRow(
+                time = getByHeader(row, headers, "交易时间"),
+                type = getByHeader(row, headers, "交易类型"),
+                counterparty = getByHeader(row, headers, "交易对方"),
+                product = getByHeader(row, headers, "商品"),
+                direction = getByHeader(row, headers, "收支"),
+                amount = getByHeader(row, headers, "金额"),
+                status = getByHeader(row, headers, "当前状态"),
+                note = getByHeader(row, headers, "备注")
+            )
+            if (bill != null) result.add(bill)
+        }
+        wb.close()
+        return result
+    }
+}
+
+fun parseWechatCsv(context: Context, uri: Uri): List<OcrBill> {
+    val text = context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: return emptyList()
+    val lines = text.lines().filter { it.isNotBlank() }
+    val headerIndex = lines.indexOfFirst { it.contains("交易时间") && (it.contains("金额") || it.contains("收/支")) }
+    if (headerIndex < 0) return emptyList()
+    val header = splitCsvLine(lines[headerIndex]).map { normalizeHeader(it) }
+    val idx = header.withIndex().associate { it.value to it.index }
+    return lines.drop(headerIndex + 1).mapNotNull { line ->
+        val cols = splitCsvLine(line)
+        fun col(key: String) = cols.getOrNull(idx[key] ?: -1).orEmpty()
+        parseWechatRow(
+            time = col("交易时间"),
+            type = col("交易类型"),
+            counterparty = col("交易对方"),
+            product = col("商品"),
+            direction = col("收支"),
+            amount = col("金额"),
+            status = col("当前状态"),
+            note = col("备注")
+        )
+    }
+}
+
+fun parseWechatRow(time: String, type: String, counterparty: String, product: String, direction: String, amount: String, status: String, note: String): OcrBill? {
+    val dir = direction.trim()
+    if (dir.contains("收入") || dir.contains("/") && !dir.contains("支")) return null
+    if (dir.isNotBlank() && !dir.contains("支")) return null
+    if (status.isNotBlank() && !(status.contains("支付成功") || status.contains("交易成功") || status.contains("已完成") || status.contains("成功"))) return null
+    val money = Regex("""[0-9]+(?:\.[0-9]{1,2})?""").find(amount.replace(",", ""))?.value ?: return null
+    val merchant = listOf(counterparty, product, type, note).firstOrNull { it.trim().isNotBlank() }?.trim() ?: "微信账单"
+    val date = Regex("""(20[0-9]{2})[-/.年]([01]?[0-9])[-/.月]([0-3]?[0-9])""").find(time)?.let {
+        it.groupValues[1] + "-" + it.groupValues[2].padStart(2, '0') + "-" + it.groupValues[3].padStart(2, '0')
+    } ?: LocalDate.now().toString()
+    val blob = listOf(counterparty, product, type, note).joinToString(" ")
+    return OcrBill(amount = money, category = guessCategory(blob), merchant = merchant.take(30), date = date, source = "微信Excel", raw = blob)
+}
+
+fun normalizeHeader(s: String): String {
+    val h = s.replace(" ", "").replace("/", "")
+    return when {
+        h.contains("交易时间") -> "交易时间"
+        h.contains("交易类型") -> "交易类型"
+        h.contains("交易对方") -> "交易对方"
+        h.contains("商品") -> "商品"
+        h.contains("收支") || h.contains("收支") -> "收支"
+        h.contains("金额") -> "金额"
+        h.contains("当前状态") || h.contains("交易状态") -> "当前状态"
+        h.contains("备注") -> "备注"
+        else -> h
+    }
+}
+
+fun getByHeader(row: org.apache.poi.ss.usermodel.Row, headers: Map<String, Int>, key: String): String = cellText(row.getCell(headers[key] ?: -1))
+
+fun cellText(cell: org.apache.poi.ss.usermodel.Cell?): String {
+    if (cell == null) return ""
+    return when (cell.cellType) {
+        org.apache.poi.ss.usermodel.CellType.STRING -> cell.stringCellValue.trim()
+        org.apache.poi.ss.usermodel.CellType.NUMERIC -> {
+            if (org.apache.poi.ss.usermodel.DateUtil.isCellDateFormatted(cell)) {
+                val d = cell.localDateTimeCellValue.toLocalDate()
+                d.toString()
+            } else {
+                val v = cell.numericCellValue
+                if (v == kotlin.math.floor(v)) v.toLong().toString() else String.format(Locale.US, "%.2f", v)
+            }
+        }
+        org.apache.poi.ss.usermodel.CellType.BOOLEAN -> cell.booleanCellValue.toString()
+        org.apache.poi.ss.usermodel.CellType.FORMULA -> try { cell.stringCellValue.trim() } catch (_: Exception) { cell.numericCellValue.toString() }
+        else -> ""
+    }
+}
+
+fun splitCsvLine(line: String): List<String> {
+    val out = mutableListOf<String>()
+    val sb = StringBuilder()
+    var quote = false
+    var i = 0
+    while (i < line.length) {
+        val ch = line[i]
+        when {
+            ch == '"' -> quote = !quote
+            ch == ',' && !quote -> { out.add(sb.toString().trim().trim('"')); sb.clear() }
+            else -> sb.append(ch)
+        }
+        i++
+    }
+    out.add(sb.toString().trim().trim('"'))
+    return out
+}
 
 fun guessCategory(s: String): String {
     val t = s.lowercase(Locale.CHINA)

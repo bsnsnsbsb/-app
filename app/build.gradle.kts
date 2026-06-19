@@ -13,8 +13,8 @@ android {
         applicationId = "com.qingji.ledger"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "2.1"
+        versionCode = 4
+        versionName = "2.2"
     }
 
     buildTypes {
@@ -44,6 +44,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    implementation("org.apache.poi:poi-ooxml:5.2.5")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
