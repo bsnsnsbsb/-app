@@ -107,22 +107,60 @@ qingji-ledger-android
 └── README.md
 ```
 
-## 构建方式
+## 如何安装 / 使用
 
-确保本机已经安装 Android Studio / Android SDK。
+### 普通用户
 
-然后执行：
+如果你只是想在手机上使用，不需要自己构建项目。
+
+可以在仓库的 **Releases** 页面下载 APK 文件，然后传到安卓手机安装。
+
+安装时如果手机提示：
+
+```text
+禁止安装未知来源应用
+```
+
+请在系统设置里允许当前浏览器或文件管理器安装 APK。
+
+> 说明：目前仓库主要提供源码。如果没有看到 Releases，说明作者还没有上传正式安装包。
+
+### 开发者：用 Android Studio 运行
+
+如果你想自己修改或编译这个 App，推荐使用 Android Studio。
+
+步骤：
+
+1. 安装 Android Studio。
+2. 克隆或下载本仓库源码。
+3. 用 Android Studio 打开项目根目录。
+4. 等待 Gradle 自动同步完成。
+5. 连接安卓手机，或启动模拟器。
+6. 点击 Android Studio 顶部的 **Run** 按钮。
+
+这样就可以直接安装到手机或模拟器上调试。
+
+### 开发者：命令行构建 APK
+
+如果你已经配置好 Android SDK，也可以在项目根目录执行：
+
+```bash
+./gradlew :app:assembleDebug
+```
+
+Windows PowerShell 使用：
 
 ```powershell
-cd D:\projects\qingji-ledger-android
 .\gradlew.bat :app:assembleDebug
 ```
 
-构建成功后，APK 位于：
+构建成功后，APK 文件在：
 
 ```text
-app\build\outputs\apk\debug\app-debug.apk
+app/build/outputs/apk/debug/app-debug.apk
 ```
+
+把这个 APK 发送到安卓手机，即可安装测试。
 
 ## 当前版本
 
